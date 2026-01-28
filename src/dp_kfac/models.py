@@ -28,6 +28,54 @@ class MLP(nn.Module):
         return self.layers(x)
 
 
+class TinyViT(nn.Module):
+    """Small Vision Transformer for spectrum analysis (2 blocks, 4 heads)."""
+
+    def __init__(
+        self,
+        img_size: int = 28,
+        patch_size: int = 7,
+        in_channels: int = 1,
+        embed_dim: int = 64,
+        num_heads: int = 4,
+        num_blocks: int = 2,
+        num_classes: int = 10,
+    ) -> None:
+        super().__init__()
+        num_patches = (img_size // patch_size) ** 2
+        self.patch_embed = nn.Linear(in_channels * patch_size * patch_size, embed_dim)
+        self.pos_embed = nn.Parameter(torch.randn(1, num_patches, embed_dim) * 0.02)
+        self.patch_size = patch_size
+
+        blocks = []
+        for _ in range(num_blocks):
+            blocks.append(nn.LayerNorm(embed_dim))
+            blocks.append(nn.MultiheadAttention(embed_dim, num_heads, batch_first=True))
+            blocks.append(nn.LayerNorm(embed_dim))
+            blocks.append(nn.Linear(embed_dim, embed_dim))
+        self.blocks = nn.ModuleList(blocks)
+        self.norm = nn.LayerNorm(embed_dim)
+        self.head = nn.Linear(embed_dim, num_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = x.shape
+        p = self.patch_size
+        x = x.unfold(2, p, p).unfold(3, p, p)
+        x = x.contiguous().view(B, -1, C * p * p)
+        x = self.patch_embed(x) + self.pos_embed
+        for i in range(0, len(self.blocks), 4):
+            ln1 = self.blocks[i]
+            attn = self.blocks[i + 1]
+            ln2 = self.blocks[i + 2]
+            ffn = self.blocks[i + 3]
+            h = ln1(x)
+            h, _ = attn(h, h, h)
+            x = x + h
+            x = x + ffn(ln2(x))
+        x = self.norm(x).mean(dim=1)
+        return self.head(x)
+
+
 class SimpleCNN(nn.Module):
     def __init__(
         self,
@@ -167,6 +215,48 @@ class BERTClassifier(nn.Module):
         return self.classifier(pooled)
 
 
+class DistilBERTClassifier(nn.Module):
+    def __init__(
+        self,
+        num_classes: int = 2,
+        model_name: str = "distilbert-base-uncased",
+        freeze_backbone: bool = True,
+    ) -> None:
+        super().__init__()
+        from transformers import AutoModel
+
+        self.backbone = AutoModel.from_pretrained(model_name)
+
+        if freeze_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+
+        self.classifier = nn.Linear(self.backbone.config.hidden_size, num_classes)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        outputs = self.backbone(input_ids=input_ids, attention_mask=attention_mask)
+        # DistilBERT has no pooler_output; use [CLS] token
+        pooled = outputs.last_hidden_state[:, 0]
+        return self.classifier(pooled)
+
+
+class LinearClassifier(nn.Module):
+    def __init__(self, input_dim: int, num_classes: int) -> None:
+        super().__init__()
+        self.classifier = nn.Linear(input_dim, num_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.classifier(x)
+
+
+# Alias for IMDB logistic regression experiments
+LogisticRegression = LinearClassifier
+
+
 def create_model(
     model_type: str,
     num_classes: int = 10,
@@ -195,6 +285,13 @@ def create_model(
     elif model_type == "bert":
         return BERTClassifier(num_classes=num_classes)
 
+    elif model_type == "distilbert":
+        return DistilBERTClassifier(num_classes=num_classes)
+
+    elif model_type == "logreg":
+        input_dim = in_channels * img_size * img_size if in_channels > 0 else img_size
+        return LogisticRegression(input_dim=input_dim, num_classes=num_classes)
+
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
@@ -216,15 +313,6 @@ def freeze_backbone(model: nn.Module) -> None:
 
 def get_trainable_params(model: nn.Module) -> list:
     return [p for p in model.parameters() if p.requires_grad]
-
-
-class LinearClassifier(nn.Module):
-    def __init__(self, input_dim: int, num_classes: int) -> None:
-        super().__init__()
-        self.classifier = nn.Linear(input_dim, num_classes)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.classifier(x)
 
 
 def create_backbone(

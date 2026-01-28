@@ -152,6 +152,9 @@ def generate_white_noise(
     input_shape: Tuple[int, ...],
     device: torch.device,
 ) -> torch.Tensor:
+    if len(input_shape) == 1:
+        # Flat features (e.g. TF-IDF)
+        return torch.randn(batch_size, input_shape[0], device=device)
     if len(input_shape) == 3:
         channels, height, width = input_shape
     else:
@@ -276,7 +279,11 @@ def train_dp_sgd(
                             pub_out = model(input_ids=noise_input_ids, attention_mask=noise_mask)
                             pub_target = noise_labels
                         else:
-                            input_shape = (data.size(1), data.size(2), data.size(3))
+                            if data.dim() == 4:
+                                input_shape = (data.size(1), data.size(2), data.size(3))
+                            else:
+                                # Flat features (e.g. TF-IDF): treat as 1D
+                                input_shape = (data.size(1),)
                             if use_pink_noise:
                                 pub_data = generate_pink_noise(batch_size, input_shape, device)
                             else:

@@ -389,6 +389,78 @@ class TextDataset(Dataset):
         }
 
 
+def get_imdb_data(
+    max_samples: int = 25000,
+) -> Tuple[List[str], List[int], List[str], List[int]]:
+    """Load IMDB movie review dataset from HuggingFace."""
+    from datasets import load_dataset
+
+    imdb = load_dataset("imdb")
+
+    train_texts = [item["text"] for item in imdb["train"]]
+    train_labels = [item["label"] for item in imdb["train"]]
+    test_texts = [item["text"] for item in imdb["test"]]
+    test_labels = [item["label"] for item in imdb["test"]]
+
+    if max_samples < len(train_texts):
+        indices = random.sample(range(len(train_texts)), max_samples)
+        train_texts = [train_texts[i] for i in indices]
+        train_labels = [train_labels[i] for i in indices]
+
+    return train_texts, train_labels, test_texts, test_labels
+
+
+def get_sst2_data(
+    max_samples: int = 67000,
+) -> Tuple[List[str], List[int], List[str], List[int]]:
+    """Load SST-2 from GLUE benchmark via HuggingFace."""
+    from datasets import load_dataset
+
+    sst2 = load_dataset("glue", "sst2")
+
+    train_texts = [item["sentence"] for item in sst2["train"]]
+    train_labels = [item["label"] for item in sst2["train"]]
+    # SST-2 test has no labels; use validation as test
+    test_texts = [item["sentence"] for item in sst2["validation"]]
+    test_labels = [item["label"] for item in sst2["validation"]]
+
+    if max_samples < len(train_texts):
+        indices = random.sample(range(len(train_texts)), max_samples)
+        train_texts = [train_texts[i] for i in indices]
+        train_labels = [train_labels[i] for i in indices]
+
+    return train_texts, train_labels, test_texts, test_labels
+
+
+def get_tfidf_features(
+    train_texts: List[str],
+    test_texts: List[str],
+    max_features: int = 10000,
+    public_texts: Optional[List[str]] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    """Extract TF-IDF features using sklearn, returning float32 tensors."""
+    from sklearn.feature_extraction.text import TfidfVectorizer
+
+    vectorizer = TfidfVectorizer(max_features=max_features)
+    train_feats = vectorizer.fit_transform(train_texts)
+    test_feats = vectorizer.transform(test_texts)
+
+    train_tensor = torch.tensor(train_feats.toarray(), dtype=torch.float32)
+    test_tensor = torch.tensor(test_feats.toarray(), dtype=torch.float32)
+
+    # Normalize to unit norm
+    train_tensor = train_tensor / (train_tensor.norm(dim=1, keepdim=True) + 1e-8)
+    test_tensor = test_tensor / (test_tensor.norm(dim=1, keepdim=True) + 1e-8)
+
+    public_tensor = None
+    if public_texts is not None:
+        public_feats = vectorizer.transform(public_texts)
+        public_tensor = torch.tensor(public_feats.toarray(), dtype=torch.float32)
+        public_tensor = public_tensor / (public_tensor.norm(dim=1, keepdim=True) + 1e-8)
+
+    return train_tensor, test_tensor, public_tensor
+
+
 def get_stackoverflow_data(
     max_samples: int = 5000,
 ) -> Tuple[List[str], List[int], List[str], List[int]]:
@@ -465,11 +537,18 @@ def get_text_loaders(
 
     if private_dataset.lower() == "stackoverflow":
         train_texts, train_labels, test_texts, test_labels = get_stackoverflow_data(max_samples)
+    elif private_dataset.lower() == "imdb":
+        train_texts, train_labels, test_texts, test_labels = get_imdb_data(max_samples)
+    elif private_dataset.lower() == "sst2":
+        train_texts, train_labels, test_texts, test_labels = get_sst2_data(max_samples)
     else:
         raise ValueError(f"Unknown private text dataset: {private_dataset}")
 
     if public_dataset.lower() == "agnews":
         public_texts, public_labels = get_agnews_data(max_samples)
+    elif public_dataset.lower() == "imdb":
+        pub_texts, pub_labels, _, _ = get_imdb_data(max_samples)
+        public_texts, public_labels = pub_texts, pub_labels
     else:
         raise ValueError(f"Unknown public text dataset: {public_dataset}")
 
@@ -499,6 +578,8 @@ def get_text_dataset_info(dataset_name: str) -> int:
     info = {
         "stackoverflow": 2,
         "agnews": 2,
+        "imdb": 2,
+        "sst2": 2,
     }
 
     if dataset_name not in info:
@@ -508,4 +589,4 @@ def get_text_dataset_info(dataset_name: str) -> int:
 
 
 def is_text_dataset(dataset_name: str) -> bool:
-    return dataset_name.lower() in ["stackoverflow", "agnews"]
+    return dataset_name.lower() in ["stackoverflow", "agnews", "imdb", "sst2"]

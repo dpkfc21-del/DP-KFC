@@ -159,6 +159,21 @@ def generate_pink_noise(
     device: torch.device,
     alpha: float = 1.0,
 ) -> Tensor:
+    if len(input_shape) == 1:
+        # Flat features (e.g. TF-IDF): use 1D pink noise via FFT
+        n_features = input_shape[0]
+        white_noise = torch.randn(batch_size, n_features, dtype=torch.cfloat, device=device)
+        freqs = torch.fft.fftfreq(n_features, device=device)
+        f = freqs.abs()
+        f[0] = 1.0
+        scale = 1.0 / (f ** alpha)
+        scale[0] = 0.0
+        pink_freq = white_noise * scale.unsqueeze(0)
+        pink_noise = torch.fft.ifft(pink_freq).real
+        std = pink_noise.std(dim=1, keepdim=True)
+        pink_noise = pink_noise / (std + 1e-8) * 0.5
+        return pink_noise
+
     if len(input_shape) == 3:
         channels, height, width = input_shape
     else:

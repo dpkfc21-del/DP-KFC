@@ -1,0 +1,2 @@
+scenario,Oracle_Private_mean,Oracle_Private_std,Identity_DP-SGD_mean,Identity_DP-SGD_std,AdaDPS_Public_mean,AdaDPS_Public_std,AdaDPS_Pink_mean,AdaDPS_Pink_std,A_pub_⊗_G_pub_pub_mean,A_pub_⊗_G_pub_pub_std,A_pink_⊗_G_pink_noise_mean,A_pink_⊗_G_pink_noise_std,winner,prediction
+1_DistMatch,65.67,0.0,63.76,0.0,63.92,0.0,64.04,0.0,65.36,0.0,64.45,0.0,A_pub ⊗ G_pub_pub,Public should win (Public ~ Oracle)
