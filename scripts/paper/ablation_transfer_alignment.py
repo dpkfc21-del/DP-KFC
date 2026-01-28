@@ -78,7 +78,7 @@ SCENARIOS = {
     },
 }
 
-SEEDS = [42, 55, 10]
+SEEDS = [42, 7, 91, 23, 58, 134, 76, 3, 219, 65]
 BATCH_SIZE = 256
 EPOCHS = 10
 LEARNING_RATE = 5e-3

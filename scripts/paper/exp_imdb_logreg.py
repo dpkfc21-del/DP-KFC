@@ -22,7 +22,7 @@ from dp_kfac.methods import estimate_adadps_preconditioner, precondition_per_sam
 from dp_kfac.results import save_results_csv
 
 EPSILONS = [0.5, 1.0, 1.5, 2.8, 8.0]
-SEEDS = [42, 43, 44, 45, 46]
+SEEDS = [42, 7, 91, 23, 58, 134, 76, 3, 219, 65]
 EPOCHS = 32
 LR = 0.1
 BATCH_SIZE = 256

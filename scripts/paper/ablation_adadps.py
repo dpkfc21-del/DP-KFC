@@ -25,7 +25,7 @@ from opacus.accountants.utils import get_noise_multiplier
 
 EPSILON = 2.0
 DELTA = 1e-5
-SEEDS = [42, 55, 10]
+SEEDS = [42, 7, 91, 23, 58, 134, 76, 3, 219, 65]
 EPOCHS = 15
 LR = 1e-2
 BATCH_SIZE = 256
