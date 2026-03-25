@@ -10,6 +10,7 @@ def clip_and_noise_gradients(
     noise_multiplier: float,
     max_grad_norm: float,
     batch_size: int,
+    store_summed_grad: bool = False,
 ) -> None:
     params = _get_params_with_grad_sample(model)
     if not params:
@@ -25,6 +26,10 @@ def clip_and_noise_gradients(
 
         clipped = grad_sample * clip_factors.unsqueeze(1)
         summed = clipped.sum(dim=0)
+
+        if store_summed_grad:
+            p.summed_grad = (summed / batch_size).view_as(p)
+
         noise = torch.randn_like(summed) * noise_multiplier * max_grad_norm
 
         p.grad = ((summed + noise) / batch_size).view_as(p)

@@ -64,6 +64,15 @@ class KFACSpecificConfig:
 
 
 @dataclass
+class BaselinesConfig:
+    """Hyperparameters for baseline comparison methods (DP-AdamBC, DiSK)."""
+    adam_bc_lr: Optional[float] = None  # if None, uses training.learning_rate
+    adam_bc_eps_root: float = 1e-2
+    adam_bc_betas: List[float] = field(default_factory=lambda: [0.9, 0.999])
+    disk_kappa: float = 0.1
+
+
+@dataclass
 class OutputConfig:
     experiments_dir: str = "experiments"
     save_checkpoints: bool = False
@@ -79,6 +88,7 @@ class Config:
     privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
     kfac: KFACSpecificConfig = field(default_factory=KFACSpecificConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
+    baselines: BaselinesConfig = field(default_factory=BaselinesConfig)
     methods: List[str] = field(default_factory=lambda: ["dp_sgd", "dp_kfac_public"])
     scenarios: List[ScenarioConfig] = field(default_factory=list)
 
@@ -121,6 +131,15 @@ class Config:
             config.kfac = KFACSpecificConfig(**kfac_data)
         if "output" in data:
             config.output = OutputConfig(**data["output"])
+        if "baselines" in data:
+            bl = data["baselines"].copy()
+            if "adam_bc_lr" in bl and bl["adam_bc_lr"] is not None:
+                bl["adam_bc_lr"] = float(bl["adam_bc_lr"])
+            if "adam_bc_eps_root" in bl:
+                bl["adam_bc_eps_root"] = float(bl["adam_bc_eps_root"])
+            if "disk_kappa" in bl:
+                bl["disk_kappa"] = float(bl["disk_kappa"])
+            config.baselines = BaselinesConfig(**bl)
         if "methods" in data:
             config.methods = data["methods"]
         if "scenarios" in data:

@@ -35,6 +35,7 @@ from .data import (
     get_stackoverflow_data,
     is_text_dataset,
 )
+from .baselines import DPAdamBC, DiSKFilter
 from .trainer import Trainer, train_dp_sgd, train_plain_sgd, evaluate, set_seed
 from .methods import (
     METHODS,
@@ -83,6 +84,8 @@ __all__ = [
     "get_imdb_data", "get_sst2_data", "get_tfidf_features",
     "get_text_loaders", "get_agnews_data", "get_stackoverflow_data",
     "is_text_dataset",
+    # Baselines
+    "DPAdamBC", "DiSKFilter",
     # Training
     "Trainer", "train_dp_sgd", "train_plain_sgd", "evaluate", "set_seed",
     # Methods

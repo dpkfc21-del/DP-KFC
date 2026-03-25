@@ -18,6 +18,7 @@ from .precondition import precondition_per_sample_gradients
 from .privacy import clip_and_noise_gradients
 from .optimizer import generate_pink_noise
 from .methods import PrecondMethod, get_method, compute_preconditioner
+from .baselines import DPAdamBC, DiSKFilter
 
 
 def set_seed(seed: int) -> None:
@@ -346,6 +347,118 @@ def train_dp_sgd(
     return results
 
 
+def _train_dp_loop(
+    model: nn.Module,
+    train_loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    noise_multiplier: float,
+    sample_rate: float,
+    max_grad_norm: float,
+    epochs: int,
+    device: torch.device,
+    test_loader: Optional[DataLoader] = None,
+    is_text: bool = False,
+    delta: float = 1e-5,
+    store_summed_grad: bool = False,
+    post_noise_hook: Optional[Any] = None,
+) -> List[Dict[str, Any]]:
+    """Shared DP training loop for baseline methods (DP-AdamBC, DiSK).
+
+    Args:
+        store_summed_grad: If True, preserve clipped-but-un-noised gradient
+            on ``p.summed_grad`` (needed by DP-AdamBC).
+        post_noise_hook: Callable(model) invoked after clipping/noise and
+            before optimizer.step() (used by DiSK filter).
+    """
+    accountant = RDPAccountant()
+    criterion = nn.CrossEntropyLoss(reduction="sum")
+    console = Console()
+    results: List[Dict[str, Any]] = []
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        epoch_task = progress.add_task("[cyan]DP Training", total=epochs)
+
+        for epoch in range(epochs):
+            model.train()
+            epoch_loss = 0.0
+            num_batches = 0
+
+            batch_task = progress.add_task(
+                f"[dim]Epoch {epoch+1}/{epochs}", total=len(train_loader)
+            )
+
+            for batch in train_loader:
+                if is_text or is_text_batch(batch):
+                    input_ids = batch["input_ids"].to(device)
+                    attention_mask = batch["attention_mask"].to(device)
+                    target = batch["labels"].to(device)
+                    batch_size = input_ids.size(0)
+                else:
+                    data, target = batch
+                    data, target = data.to(device), target.to(device)
+                    batch_size = data.size(0)
+
+                model.zero_grad(set_to_none=True)
+
+                if is_text or is_text_batch(batch):
+                    output = model(input_ids=input_ids, attention_mask=attention_mask)
+                else:
+                    output = model(data)
+
+                loss = criterion(output, target)
+                loss.backward()
+
+                clip_and_noise_gradients(
+                    model, noise_multiplier, max_grad_norm, batch_size,
+                    store_summed_grad=store_summed_grad,
+                )
+
+                if post_noise_hook is not None:
+                    post_noise_hook(model)
+
+                optimizer.step()
+                accountant.step(
+                    noise_multiplier=noise_multiplier,
+                    sample_rate=sample_rate,
+                )
+
+                epoch_loss += loss.item() / batch_size
+                num_batches += 1
+                progress.advance(batch_task)
+
+            progress.remove_task(batch_task)
+            avg_loss = epoch_loss / num_batches
+            epsilon = accountant.get_epsilon(delta=delta)
+
+            results.append({
+                "epoch": epoch + 1,
+                "train_loss": avg_loss,
+                "test_loss": 0.0,
+                "accuracy": 0.0,
+                "epsilon_spent": epsilon,
+            })
+
+            progress.advance(epoch_task)
+            progress.update(
+                epoch_task,
+                description=f"[cyan]DP Training [dim]loss={avg_loss:.3f} [yellow]ε={epsilon:.2f}",
+            )
+
+    if test_loader is not None:
+        acc, test_loss = evaluate(model, test_loader, device, is_text=is_text)
+        results[-1]["test_loss"] = test_loss
+        results[-1]["accuracy"] = acc
+
+    return results
+
+
 class Trainer:
     def __init__(
         self,
@@ -648,6 +761,112 @@ class Trainer:
         results[-1]["accuracy"] = acc
 
         return results
+
+    def train_dp_adam_bc(
+        self,
+        epochs: int,
+        epsilon: float,
+        delta: float,
+        max_grad_norm: float,
+        seed: int,
+        lr: Optional[float] = None,
+        eps_root: float = 1e-2,
+        betas: Tuple[float, float] = (0.9, 0.999),
+    ) -> List[Dict[str, Any]]:
+        """Train with DP-AdamBC (bias-corrected Adam for DP)."""
+        set_seed(seed)
+
+        model = self._fresh_model()
+        model = model.to(self.device)
+        model = GradSampleModule(model, batch_first=True, loss_reduction="sum")
+
+        train_size = len(self.train_loader.dataset)  # type: ignore[arg-type]
+        batch_size = self.train_loader.batch_size or 256
+        sample_rate = batch_size / train_size
+        total_steps = epochs * (train_size // batch_size)
+
+        noise_multiplier = get_noise_multiplier(
+            target_epsilon=epsilon,
+            target_delta=delta,
+            sample_rate=sample_rate,
+            steps=total_steps,
+            accountant="rdp",
+        )
+
+        adam_lr = lr if lr is not None else self.learning_rate
+        params = [p for p in model.parameters() if p.requires_grad]
+        optimizer = DPAdamBC(
+            params,
+            lr=adam_lr,
+            betas=betas,
+            eps_root=eps_root,
+            noise_multiplier=noise_multiplier,
+            max_grad_norm=max_grad_norm,
+            batch_size=batch_size,
+        )
+
+        return _train_dp_loop(
+            model=model,
+            train_loader=self.train_loader,
+            optimizer=optimizer,
+            noise_multiplier=noise_multiplier,
+            sample_rate=sample_rate,
+            max_grad_norm=max_grad_norm,
+            epochs=epochs,
+            device=self.device,
+            test_loader=self.test_loader,
+            is_text=self.is_text,
+            delta=delta,
+            store_summed_grad=True,
+        )
+
+    def train_dp_disk(
+        self,
+        epochs: int,
+        epsilon: float,
+        delta: float,
+        max_grad_norm: float,
+        seed: int,
+        kappa: float = 0.1,
+    ) -> List[Dict[str, Any]]:
+        """Train with DiSK (Kalman filter denoising for DP)."""
+        set_seed(seed)
+
+        model = self._fresh_model()
+        model = model.to(self.device)
+        model = GradSampleModule(model, batch_first=True, loss_reduction="sum")
+
+        optimizer = self._create_optimizer(model)
+
+        train_size = len(self.train_loader.dataset)  # type: ignore[arg-type]
+        batch_size = self.train_loader.batch_size or 256
+        sample_rate = batch_size / train_size
+        total_steps = epochs * (train_size // batch_size)
+
+        noise_multiplier = get_noise_multiplier(
+            target_epsilon=epsilon,
+            target_delta=delta,
+            sample_rate=sample_rate,
+            steps=total_steps,
+            accountant="rdp",
+        )
+
+        disk_filter = DiSKFilter(kappa=kappa)
+
+        return _train_dp_loop(
+            model=model,
+            train_loader=self.train_loader,
+            optimizer=optimizer,
+            noise_multiplier=noise_multiplier,
+            sample_rate=sample_rate,
+            max_grad_norm=max_grad_norm,
+            epochs=epochs,
+            device=self.device,
+            test_loader=self.test_loader,
+            is_text=self.is_text,
+            delta=delta,
+            post_noise_hook=disk_filter.apply,
+        )
 
     def _fresh_model(self) -> nn.Module:
         import copy
