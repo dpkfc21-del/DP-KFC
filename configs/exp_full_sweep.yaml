@@ -1,6 +1,6 @@
 experiment:
-  name: "quick_baselines_eps1"
-  seeds: [42]
+  name: "full_sweep_baselines"
+  seeds: [42, 43, 44]
   device: "cuda"
 
 data:
@@ -20,7 +20,7 @@ training:
   optimizer: "adam"
 
 privacy:
-  epsilons: [1.0]
+  epsilons: [1.0, 2.0, 5.0, 8.0]
   delta: 1e-5
   max_grad_norm: 1.0
 
@@ -37,12 +37,11 @@ kfac:
   update_frequency: 1
 
 methods:
-  #- "baseline"
-  #- "dp_sgd"
-  #- "dp_adam_bc"
-  #- "dp_disk"
-  #- "dp_kfac_public"
-  #- "dp_kfac_pink"
+  - "dp_sgd"
+  - "dp_adam_bc"
+  - "dp_disk"
+  - "dp_kfac_public"
+  - "dp_kfac_pink"
   - "dp_adambc_kfac_synthetic"
 
 output:

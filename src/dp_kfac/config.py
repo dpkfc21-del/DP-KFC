@@ -70,6 +70,8 @@ class BaselinesConfig:
     adam_bc_eps_root: float = 1e-2
     adam_bc_betas: List[float] = field(default_factory=lambda: [0.9, 0.999])
     disk_kappa: float = 0.1
+    disk_lr: Optional[float] = None  # if None, uses training.learning_rate
+    adambc_kfac_lr: Optional[float] = None  # if None, uses adam_bc_lr
 
 
 @dataclass
@@ -139,6 +141,10 @@ class Config:
                 bl["adam_bc_eps_root"] = float(bl["adam_bc_eps_root"])
             if "disk_kappa" in bl:
                 bl["disk_kappa"] = float(bl["disk_kappa"])
+            if "disk_lr" in bl:
+                bl["disk_lr"] = float(bl["disk_lr"])
+            if "adambc_kfac_lr" in bl and bl["adambc_kfac_lr"] is not None:
+                bl["adambc_kfac_lr"] = float(bl["adambc_kfac_lr"])
             config.baselines = BaselinesConfig(**bl)
         if "methods" in data:
             config.methods = data["methods"]

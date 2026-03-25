@@ -267,11 +267,58 @@ def run_method(
             max_grad_norm=config.privacy.max_grad_norm,
             seed=seed,
             kappa=config.baselines.disk_kappa,
+            lr=config.baselines.disk_lr,
         )
         final = results[-1]
         run.log(f"DiSK: Acc={final['accuracy']*100:.2f}%", "green")
         return {
             "method": "dp_disk",
+            "seed": seed,
+            "epsilon": epsilon,
+            "final_accuracy": final["accuracy"],
+            "final_loss": final["test_loss"],
+            "history": results,
+        }
+
+    elif method == "dp_adambc_kfac_synthetic":
+        run.log(f"Training DP-AdamBC + Synthetic KFAC (ε={epsilon})...", "yellow")
+        results = trainer.train_dp_adambc_kfac_synthetic(
+            epochs=config.training.epochs,
+            epsilon=epsilon,
+            delta=config.privacy.delta,
+            max_grad_norm=config.privacy.max_grad_norm,
+            seed=seed,
+            lr=config.baselines.adambc_kfac_lr or config.baselines.adam_bc_lr,
+            eps_root=config.baselines.adam_bc_eps_root,
+            betas=tuple(config.baselines.adam_bc_betas),
+            kfac_config=kfac_config,
+        )
+        final = results[-1]
+        run.log(f"DP-AdamBC+KFC: Acc={final['accuracy']*100:.2f}%", "green")
+        return {
+            "method": "dp_adambc_kfac_synthetic",
+            "seed": seed,
+            "epsilon": epsilon,
+            "final_accuracy": final["accuracy"],
+            "final_loss": final["test_loss"],
+            "history": results,
+        }
+
+    elif method == "dp_kfac_lora":
+        run.log(f"Training DP-KFC + LoRA (ε={epsilon})...", "yellow")
+        results = trainer.train_dp_kfac_lora(
+            epochs=config.training.epochs,
+            epsilon=epsilon,
+            delta=config.privacy.delta,
+            max_grad_norm=config.privacy.max_grad_norm,
+            seed=seed,
+            lr=config.training.learning_rate,
+            kfac_config=kfac_config,
+        )
+        final = results[-1]
+        run.log(f"DP-KFC+LoRA: Acc={final['accuracy']*100:.2f}%", "green")
+        return {
+            "method": "dp_kfac_lora",
             "seed": seed,
             "epsilon": epsilon,
             "final_accuracy": final["accuracy"],

@@ -15,6 +15,7 @@ from .models import (
     SimpleCNN,
     TinyViT,
     CrossViTClassifier,
+    CrossViTLoRAClassifier,
     ConvNeXtClassifier,
     RoBERTaClassifier,
     BERTClassifier,
@@ -75,7 +76,7 @@ __all__ = [
     # Config & experiment
     "Config", "ExperimentRun",
     # Models
-    "MLP", "SimpleCNN", "CrossViTClassifier", "ConvNeXtClassifier",
+    "MLP", "SimpleCNN", "CrossViTClassifier", "CrossViTLoRAClassifier", "ConvNeXtClassifier",
     "RoBERTaClassifier", "BERTClassifier", "DistilBERTClassifier",
     "LinearClassifier", "LogisticRegression",
     "create_model", "get_model_img_size",

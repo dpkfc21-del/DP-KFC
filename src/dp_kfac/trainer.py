@@ -361,6 +361,7 @@ def _train_dp_loop(
     delta: float = 1e-5,
     store_summed_grad: bool = False,
     post_noise_hook: Optional[Any] = None,
+    pre_clip_hook: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     """Shared DP training loop for baseline methods (DP-AdamBC, DiSK).
 
@@ -369,6 +370,8 @@ def _train_dp_loop(
             on ``p.summed_grad`` (needed by DP-AdamBC).
         post_noise_hook: Callable(model) invoked after clipping/noise and
             before optimizer.step() (used by DiSK filter).
+        pre_clip_hook: Callable(model) invoked after backward and before
+            clipping/noise (used by KFAC preconditioning).
     """
     accountant = RDPAccountant()
     criterion = nn.CrossEntropyLoss(reduction="sum")
@@ -414,6 +417,9 @@ def _train_dp_loop(
 
                 loss = criterion(output, target)
                 loss.backward()
+
+                if pre_clip_hook is not None:
+                    pre_clip_hook(model)
 
                 clip_and_noise_gradients(
                     model, noise_multiplier, max_grad_norm, batch_size,
@@ -820,6 +826,192 @@ class Trainer:
             store_summed_grad=True,
         )
 
+    def train_dp_adambc_kfac_synthetic(
+        self,
+        epochs: int,
+        epsilon: float,
+        delta: float,
+        max_grad_norm: float,
+        seed: int,
+        lr: Optional[float] = None,
+        eps_root: float = 1e-2,
+        betas: Tuple[float, float] = (0.9, 0.999),
+        kfac_config: Optional[KFACConfig] = None,
+    ) -> List[Dict[str, Any]]:
+        """Train with DP-AdamBC + synthetic KFAC preconditioning."""
+        set_seed(seed)
+        kfac_config = kfac_config or KFACConfig()
+
+        model = self._fresh_model()
+        model = model.to(self.device)
+        model = GradSampleModule(model, batch_first=True, loss_reduction="sum")
+
+        train_size = len(self.train_loader.dataset)  # type: ignore[arg-type]
+        batch_size = self.train_loader.batch_size or 256
+        sample_rate = batch_size / train_size
+        total_steps = epochs * (train_size // batch_size)
+
+        noise_multiplier = get_noise_multiplier(
+            target_epsilon=epsilon,
+            target_delta=delta,
+            sample_rate=sample_rate,
+            steps=total_steps,
+            accountant="rdp",
+        )
+
+        # Set up AdamBC optimizer
+        adam_lr = lr if lr is not None else self.learning_rate
+        params = [p for p in model.parameters() if p.requires_grad]
+        optimizer = DPAdamBC(
+            params,
+            lr=adam_lr,
+            betas=betas,
+            eps_root=eps_root,
+            noise_multiplier=noise_multiplier,
+            max_grad_norm=max_grad_norm,
+            batch_size=batch_size,
+        )
+
+        # Compute synthetic KFAC preconditioner
+        num_classes = 10
+        if hasattr(self.model, "fc2"):
+            num_classes = int(getattr(self.model.fc2, "out_features", 10))
+        elif hasattr(self.model, "classifier"):
+            num_classes = int(getattr(self.model.classifier, "out_features", 10))
+
+        recorder = KFACRecorder(model)
+        recorder.enable()
+
+        # Forward pass with synthetic pink noise to estimate KFAC factors
+        if not self.is_text:
+            sample_data, _ = next(iter(self.train_loader))
+            if sample_data.dim() == 4:
+                input_shape = (sample_data.size(1), sample_data.size(2), sample_data.size(3))
+            else:
+                input_shape = (sample_data.size(1),)
+            syn_data = generate_pink_noise(batch_size, input_shape, self.device)
+            syn_target = torch.randint(0, num_classes, (batch_size,), device=self.device)
+            syn_out = model(syn_data)
+        else:
+            syn_ids, syn_mask, syn_target = generate_synthetic_text_batch(
+                batch_size=batch_size,
+                max_len=self.max_seq_len,
+                vocab_size=self.vocab_size,
+                num_classes=num_classes,
+                device=self.device,
+            )
+            syn_out = model(input_ids=syn_ids, attention_mask=syn_mask)
+
+        syn_loss = F.cross_entropy(syn_out, syn_target)
+        syn_loss.backward()
+
+        cov = compute_covariances(model, recorder.activations, recorder.backprops)
+        inv_A, inv_G = compute_inverse_sqrt(cov, damping=kfac_config.damping)
+
+        recorder.disable()
+        recorder.remove()
+        model.zero_grad(set_to_none=True)
+
+        # Pre-clip hook: apply KFAC preconditioning to per-sample gradients
+        def kfac_precondition(m: nn.Module) -> None:
+            precondition_per_sample_gradients(m, inv_A, inv_G)
+
+        return _train_dp_loop(
+            model=model,
+            train_loader=self.train_loader,
+            optimizer=optimizer,
+            noise_multiplier=noise_multiplier,
+            sample_rate=sample_rate,
+            max_grad_norm=max_grad_norm,
+            epochs=epochs,
+            device=self.device,
+            test_loader=self.test_loader,
+            is_text=self.is_text,
+            delta=delta,
+            store_summed_grad=True,
+            pre_clip_hook=kfac_precondition,
+        )
+
+    def train_dp_kfac_lora(
+        self,
+        epochs: int,
+        epsilon: float,
+        delta: float,
+        max_grad_norm: float,
+        seed: int,
+        lr: float = 1e-3,
+        kfac_config: Optional[KFACConfig] = None,
+    ) -> List[Dict[str, Any]]:
+        """Train LoRA adapters with synthetic KFAC preconditioning + DP."""
+        set_seed(seed)
+        kfac_config = kfac_config or KFACConfig()
+
+        model = self._fresh_model()
+        model = model.to(self.device)
+        model = GradSampleModule(model, batch_first=True, loss_reduction="sum")
+
+        train_size = len(self.train_loader.dataset)  # type: ignore[arg-type]
+        batch_size = self.train_loader.batch_size or 256
+        sample_rate = batch_size / train_size
+        total_steps = epochs * (train_size // batch_size)
+
+        noise_multiplier = get_noise_multiplier(
+            target_epsilon=epsilon,
+            target_delta=delta,
+            sample_rate=sample_rate,
+            steps=total_steps,
+            accountant="rdp",
+        )
+
+        params = [p for p in model.parameters() if p.requires_grad]
+        optimizer = torch.optim.Adam(params, lr=lr)
+
+        # Compute synthetic KFAC preconditioner
+        num_classes = 10
+        if hasattr(self.model, "classifier"):
+            num_classes = int(getattr(self.model.classifier, "out_features", 10))
+
+        recorder = KFACRecorder(model)
+        recorder.enable()
+
+        # Forward with pink noise to estimate KFAC factors on LoRA layers
+        sample_data, _ = next(iter(self.train_loader))
+        if sample_data.dim() == 4:
+            input_shape = (sample_data.size(1), sample_data.size(2), sample_data.size(3))
+        else:
+            input_shape = (sample_data.size(1),)
+        syn_data = generate_pink_noise(batch_size, input_shape, self.device)
+        syn_target = torch.randint(0, num_classes, (batch_size,), device=self.device)
+        syn_out = model(syn_data)
+
+        syn_loss = F.cross_entropy(syn_out, syn_target)
+        syn_loss.backward()
+
+        cov = compute_covariances(model, recorder.activations, recorder.backprops)
+        inv_A, inv_G = compute_inverse_sqrt(cov, damping=kfac_config.damping)
+
+        recorder.disable()
+        recorder.remove()
+        model.zero_grad(set_to_none=True)
+
+        def kfac_precondition(m: nn.Module) -> None:
+            precondition_per_sample_gradients(m, inv_A, inv_G)
+
+        return _train_dp_loop(
+            model=model,
+            train_loader=self.train_loader,
+            optimizer=optimizer,
+            noise_multiplier=noise_multiplier,
+            sample_rate=sample_rate,
+            max_grad_norm=max_grad_norm,
+            epochs=epochs,
+            device=self.device,
+            test_loader=self.test_loader,
+            is_text=self.is_text,
+            delta=delta,
+            pre_clip_hook=kfac_precondition,
+        )
+
     def train_dp_disk(
         self,
         epochs: int,
@@ -828,6 +1020,7 @@ class Trainer:
         max_grad_norm: float,
         seed: int,
         kappa: float = 0.1,
+        lr: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         """Train with DiSK (Kalman filter denoising for DP)."""
         set_seed(seed)
@@ -835,8 +1028,6 @@ class Trainer:
         model = self._fresh_model()
         model = model.to(self.device)
         model = GradSampleModule(model, batch_first=True, loss_reduction="sum")
-
-        optimizer = self._create_optimizer(model)
 
         train_size = len(self.train_loader.dataset)  # type: ignore[arg-type]
         batch_size = self.train_loader.batch_size or 256
@@ -852,6 +1043,11 @@ class Trainer:
         )
 
         disk_filter = DiSKFilter(kappa=kappa)
+
+        # DiSK's Kalman filter replaces momentum — use SGD without momentum
+        disk_lr = lr if lr is not None else self.learning_rate
+        params = [p for p in model.parameters() if p.requires_grad]
+        optimizer = torch.optim.SGD(params, lr=disk_lr, momentum=0.0)
 
         return _train_dp_loop(
             model=model,
@@ -870,7 +1066,12 @@ class Trainer:
 
     def _fresh_model(self) -> nn.Module:
         import copy
-        if hasattr(self.model, 'backbone') and hasattr(self.model, 'classifier'):
+        from .lora import LoRALinear
+
+        # LoRA models have trainable params in backbone — must deepcopy
+        has_lora = any(isinstance(m, LoRALinear) for m in self.model.modules())
+
+        if hasattr(self.model, 'backbone') and hasattr(self.model, 'classifier') and not has_lora:
             model = nn.Module.__new__(type(self.model))
             nn.Module.__init__(model)
             model.backbone = self.model.backbone

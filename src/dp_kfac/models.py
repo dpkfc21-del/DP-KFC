@@ -130,6 +130,61 @@ class CrossViTClassifier(nn.Module):
         return self.classifier(features)
 
 
+class CrossViTLoRAClassifier(nn.Module):
+    """CrossViT with LoRA adapters on attention layers + trainable classifier.
+
+    Instead of only training the linear head, we also inject low-rank adapters
+    into the backbone's attention projections. The base weights remain frozen.
+    """
+
+    def __init__(
+        self,
+        num_classes: int = 100,
+        img_size: int = 240,
+        model_name: str = "crossvit_tiny_240",
+        pretrained: bool = True,
+        lora_r: int = 8,
+        lora_alpha: float = 16.0,
+        lora_dropout: float = 0.0,
+        lora_targets: Tuple[str, ...] = ("qkv", "proj"),
+    ) -> None:
+        super().__init__()
+        import timm
+        from .lora import apply_lora, count_lora_params
+
+        self.backbone = timm.create_model(model_name, pretrained=pretrained, num_classes=0)
+
+        # Apply LoRA to attention layers in the backbone
+        self.backbone, num_replaced = apply_lora(
+            self.backbone,
+            target_modules=list(lora_targets),
+            r=lora_r,
+            alpha=lora_alpha,
+            dropout=lora_dropout,
+        )
+
+        with torch.no_grad():
+            dummy = torch.randn(1, 3, img_size, img_size)
+            features = self.backbone(dummy)
+            self.feature_dim = features.shape[1]
+
+        self.classifier = nn.Linear(self.feature_dim, num_classes)
+
+        trainable, total = count_lora_params(self)
+        # classifier params are also trainable
+        trainable += sum(p.numel() for p in self.classifier.parameters())
+        self._lora_info = {
+            "num_replaced": num_replaced,
+            "trainable": trainable,
+            "total": total + sum(p.numel() for p in self.classifier.parameters()),
+        }
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Backbone forward WITH LoRA (no torch.no_grad — LoRA params need grad)
+        features = self.backbone(x)
+        return self.classifier(features)
+
+
 class ConvNeXtClassifier(nn.Module):
     def __init__(
         self,
@@ -276,6 +331,9 @@ def create_model(
     elif model_type == "crossvit":
         return CrossViTClassifier(num_classes=num_classes, img_size=240, pretrained=pretrained)
 
+    elif model_type == "crossvit_lora":
+        return CrossViTLoRAClassifier(num_classes=num_classes, img_size=240, pretrained=pretrained)
+
     elif model_type == "convnext":
         return ConvNeXtClassifier(num_classes=num_classes, img_size=224, pretrained=pretrained)
 
@@ -298,7 +356,7 @@ def create_model(
 
 def get_model_img_size(model_type: str, default_img_size: int = 28) -> int:
     model_type = model_type.lower()
-    if model_type == "crossvit":
+    if model_type in ("crossvit", "crossvit_lora"):
         return 240
     elif model_type == "convnext":
         return 224
